@@ -19,7 +19,7 @@ def send_batch(data: list[dict], server_addr: str, root_context: str, resource: 
     send(data, server_addr, root_context, resource)
 
 
-def start(device_id: str, server_addr: str, root_context: str, resource: str, verb: str) -> Optional[str]:
+def start(device_id: str, server_addr: str, root_context: str, resource: str, verb: str):
     try:
         print(f"START")
         url = f"{server_addr}{root_context}{resource}{verb}"
@@ -53,7 +53,6 @@ def stop(training_id: int, device_id: str, server_addr: str, root_context: str, 
         )
         if response.ok:
             print(f"✅ Fin de l'entraînement ({response.status_code}) : {response.headers}")
-            response_data = response.json()
         else:
             print(f"❌ Échec de l’envoi (HTTP {response.status_code}) : {response.text}")
     except Exception as e:

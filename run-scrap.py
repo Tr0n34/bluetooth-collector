@@ -1,6 +1,10 @@
 import asyncio
 import time
 import uuid
+import sys
+import os
+import socket
+from threading import Thread
 from configuration.confliguration_loader import load_config
 from mora.sender_api import send_one
 from mora.sender_api import send_batch
@@ -30,9 +34,46 @@ SCRAP_INTERVAL = configuration.bluetooth.scrap.interval
 
 last_send_time = None
 first_data_received = asyncio.Event()
+STOP_EVENT = asyncio.Event()
+STOP_SERVER_PORT = 9999
+READY_FLAG_FILE = "D:\\DATA\\stop_server_ready.flag"
+
+
+def run_stop_server(loop):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(('127.0.0.1', STOP_SERVER_PORT))
+        s.listen()
+        s.settimeout(2.0)
+
+        with open(READY_FLAG_FILE, 'w') as f:
+            f.write('ready')
+
+        print(f"Serveur arrêt en écoute sur 127.0.0.1:{STOP_SERVER_PORT}", flush=True)
+        while not STOP_EVENT.is_set():
+            try:
+                conn, addr = s.accept()
+                with conn:
+                    print('Commande arrêt reçue depuis', addr)
+                    data = conn.recv(1024)
+                    message = data.decode().strip()
+                    print('Message reçu:', message)
+
+                    if message == "STOP":
+                        loop.call_soon_threadsafe(STOP_EVENT.set)
+                        conn.sendall(b"STOP_ACK")
+                        print("STOP_ACK envoyé, arrêt demandé.")
+                        break
+            except socket.timeout:
+                pass
 
 
 async def main():
+
+    loop = asyncio.get_running_loop()
+    server_thread = Thread(target=run_stop_server, args=(loop,), daemon=True)
+    server_thread.start()
+
     if not configuration.mock.send.isActive:
         client, notify_uuid, parser = await get_real_client()
 
@@ -79,16 +120,25 @@ async def main():
             return enriched
 
         try:
-            training_id = start(device_id, API_URL, CONTEXT_ROOT, RESOURCE_TRAINING, VERB_START)
+
             await client.start_notify(notify_uuid, on_notify)
-            while True:
+            training_id = start(device_id, API_URL, CONTEXT_ROOT, RESOURCE_TRAINING, VERB_START)
+            if STOP_EVENT.is_set():
+                stop(training_id, device_id, API_URL, CONTEXT_ROOT, RESOURCE_TRAINING, VERB_STOP)
+                if os.path.exists(READY_FLAG_FILE):
+                    os.remove(READY_FLAG_FILE)
+            while not STOP_EVENT.is_set():
                 await asyncio.sleep(SCRAP_INTERVAL)
         except asyncio.CancelledError:
+            stop(training_id, device_id, API_URL, CONTEXT_ROOT, RESOURCE_TRAINING, VERB_STOP)
             print("🛑 Tâche annulée proprement.")
+            raise
         except KeyboardInterrupt:
+            stop(training_id, device_id, API_URL, CONTEXT_ROOT, RESOURCE_TRAINING, VERB_STOP)
             print("\n🛑 Arrêt détecté, envoi de la dernière donnée avec stopDate...")
         finally:
-            stop(training_id, device_id, API_URL, CONTEXT_ROOT, RESOURCE_TRAINING, VERB_STOP)
+            if STOP_EVENT.is_set():
+                stop(training_id, device_id, API_URL, CONTEXT_ROOT, RESOURCE_TRAINING, VERB_STOP)
             await client.stop_notify(notify_uuid)
             await client.disconnect()
 
@@ -99,16 +149,4 @@ def reset_data_counter():
 
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    main_task = loop.create_task(main())
-
-    try:
-        loop.run_until_complete(main_task)
-    except KeyboardInterrupt:
-        print("⏹️ Arrêt manuel détecté, annulation de la tâche...")
-        main_task.cancel()
-        loop.run_until_complete(main_task)
-    finally:
-        loop.close()
+    asyncio.run(main())
